@@ -13,6 +13,5 @@ if __name__ == "__main__":
 			multiplier = 0.6,
 			internal_flip = False,
 			internal_resample_multiplier = 1
-		),
-		timing_function=lambda t: 1.5 - t * 0.5
+		)
 	)
