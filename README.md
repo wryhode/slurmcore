@@ -1,6 +1,10 @@
 # slurmcore tool
 this is a simple(ish) tool to make slurmcore!
 
+## issues
+- popping is a prominent issue as the slices are spliced without any mixing. this is very fixable tho
+- unfriendly parameter names
+
 ## usage
 this project needs python 3.11 or 3.12 to work as some libraries do not support newer versions. i use python 3.11.
 
