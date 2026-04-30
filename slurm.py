@@ -4,6 +4,7 @@
 """
 
 import os
+import math
 import time
 
 from dataclasses import dataclass
@@ -66,11 +67,26 @@ def load_audio_file(path: str) -> tuple[np.ndarray, float]:
 	data, sample_rate = librosa.load(path, sr=None)
 	return data, sample_rate
 
-def slurm(data: np.ndarray, sample_rate: float, beats_per_minute: float, slice_settings: SliceSettings, echo_settings: EchoSettings, timing_function = lambda t: 1) -> np.ndarray:
+def slurm(data: np.ndarray, sample_rate: float, beats_per_minute: float, slice_settings: SliceSettings, echo_settings: EchoSettings, timing_function = lambda t: 1, click_removal_samples: int = 100) -> np.ndarray:
+	"""_summary_
+
+	Args:
+		data (np.ndarray): mono audio data as a 1-dimensional numpy array
+		sample_rate (float): input data sample rate
+		beats_per_minute (float): beats per minute to base slurm slicing off
+		slice_settings (SliceSettings): a SliceSettings object containing slice settings
+		echo_settings (EchoSettings): an EchoSettings object containing echo settings
+		timing_function (_type_, optional): A function that provides a number for resampling the current slice. Think of it as a speed value. Defaults to lambda t : 1, meaning no dynamic speed change.
+		click_removal_samples (int, optional): Amount of samples to use on a slice edge for click removal, acts like a lowpass filter. Defaults to 100, a good guesstimated value.
+
+	Returns:
+		np.ndarray: slurmed audio output
+	"""
+
 	data_size = len(data)
 	track_length = data_size / sample_rate
 	seconds_per_beat = 60 / beats_per_minute
-	beat_sample_length = np.floor(seconds_per_beat * sample_rate)
+	beat_sample_length = np.floor(0.5 + seconds_per_beat * sample_rate)
 	beats = np.floor(data_size / beat_sample_length)
 
 	slices = np.array_split(data, beats)
@@ -80,8 +96,6 @@ def slurm(data: np.ndarray, sample_rate: float, beats_per_minute: float, slice_s
 
 	for i, slice in enumerate(slices):
 		t = i / len(slices)
-		#v = 0.9 + np.sin((1 / 64) * i * np.pi) * 0.1
-		#v = 0.9 + t * 0.2
 		v = timing_function(t)
 
 		# slurm and resample new slice
@@ -113,14 +127,60 @@ def slurm(data: np.ndarray, sample_rate: float, beats_per_minute: float, slice_s
 		if echo_settings.flipflop:
 			echo_buf = np.flip(echo_buf)
 
+	# click removal
+	# weighted lerp between average and regular value on samples on the border between two slices
+	# this should really be done when slicing as echo does weird things still 
+	if click_removal_samples > 0:
+		averaging_samples = click_removal_samples
+		avg_left_half_n = math.floor(averaging_samples / 2)
+		avg_right_half_n = math.ceil(averaging_samples / 2)
+		averaging_window = np.hamming(averaging_samples)
+
+		for i, slice in enumerate(slices_cut):
+			if i > len(slices_cut) - 2:
+				break
+
+			current = slices_cut[i]
+			next = slices_cut[i + 1]
+			
+			current_affected = current[-avg_left_half_n:]
+			next_affected = next[:avg_right_half_n]
+			
+			affected = np.concatenate((current_affected, next_affected), axis = 0)
+			average = np.sum(affected) / averaging_samples
+			
+			current_affected = current_affected * (1 - averaging_window[:avg_left_half_n]) + average * averaging_window[:avg_left_half_n]
+			next_affected = next_affected * (1 - averaging_window[avg_right_half_n:]) + average * averaging_window[avg_right_half_n:]
+		
+			current[-avg_right_half_n:] = current_affected
+			next[:avg_right_half_n] = next_affected
+
+			slices_cut[i] = current
+			slices_cut[i + 1] = next
+
 	# combine slices
 	inter_data = np.concatenate(slices_cut)
 	inter_data_length = len(inter_data) / sample_rate
 	len_ratio = track_length / inter_data_length
 	return inter_data
 
-def full_slurm(path: str, bpm: float, input_resample_multiplier: float = 1, output_resample_multiplier: float = 1, slice_settings = SliceSettings(), echo_settings = EchoSettings(), timing_function = lambda t: 1):
+def full_slurm(path: str, bpm: float, input_resample_multiplier: float = 1, output_resample_multiplier: float = 1, slice_settings = SliceSettings(), echo_settings = EchoSettings(), timing_function = lambda t: 1) -> tuple[str, np.ndarray]:
+	"""_summary_
+
+	Args:
+		path (str): Audio file path
+		bpm (float): Audio beats per minute
+		input_resample_multiplier (float, optional): Resample input file by an amount. Effectively a speed change. Defaults to 1.
+		output_resample_multiplier (float, optional): Resample output file by an amount. Effectively a speed change. Defaults to 1.
+		slice_settings (SliceSettings, optional): A SliceSettings object . Defaults to SliceSettings().
+		echo_settings (EchoSettings, optional): An EchoSettings object. Defaults to EchoSettings().
+		timing_function (_type_, optional): Timing function. Controls slice speed with a resample. Defaults to lambda t : 1.
+
+	Returns:
+		tuple[str, np.ndarray]: Returns output path and the slurmed data
+	"""
 	start_time = time.time()
+	resulting_bpm = ((bpm / input_resample_multiplier) * (1 / slice_settings.beat_size)) / output_resample_multiplier
 	output_path = path_extend_filename(path, '-slurmed')
 
 	print(f"Loading {path}...", end='')
@@ -135,7 +195,7 @@ def full_slurm(path: str, bpm: float, input_resample_multiplier: float = 1, outp
 
 	# slurm it
 	print(f"Slurming...", end='')
-	data = slurm(data, sample_rate, bpm, slice_settings, echo_settings, timing_function)
+	data = slurm(data, sample_rate, bpm, slice_settings, echo_settings, timing_function, 200)
 	print("Done")
 
 	# a final resampling
@@ -144,11 +204,10 @@ def full_slurm(path: str, bpm: float, input_resample_multiplier: float = 1, outp
 		data = resample_multiplier(data, sample_rate, output_resample_multiplier)
 		print("Done")
 
-	new_length = len(data) / sample_rate
-
 	print(f"Saving to {output_path}...", end='')
 	soundfile.write(output_path, data, sample_rate)
 	print("Done")
+	print(f"New BPM is {resulting_bpm}")
 	slurm_time = time.time() - start_time
 	print(f"All done! Took {round(slurm_time, 4)} seconds")
-	return output_path, data
+	return (output_path, data)
