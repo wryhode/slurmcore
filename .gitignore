@@ -1,4 +1,5 @@
 audio/
+.venv/
 venv/
 venv_win/
 __pycache__/
